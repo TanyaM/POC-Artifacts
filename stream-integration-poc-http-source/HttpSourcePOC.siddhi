@@ -1,0 +1,46 @@
+@App:name("HttpSourcePOC.siddhi")
+
+@source(type='http', receiver.url='http://localhost:9055/aviall/wheelandbrake',
+@map(type='json'))
+define stream WheelServiceStream (aircraftType string, partSerialNumber string);
+
+@Store(type="rdbms", jdbc.url="jdbc:mysql://localhost:3306/test", username="root", password="root", jdbc.driver.name="com.mysql.jdbc.Driver")
+@PrimaryKey("SerialNo")
+define table RepairInfo( SerialNo string, AerospacePart string, OEM string, RepairLocation string);
+
+@Store(type="rdbms", jdbc.url="jdbc:mysql://localhost:3306/test", username="root", password="root", jdbc.driver.name="com.mysql.jdbc.Driver")
+define table MaintenanceHistory(aircraftType string, SerialNo string, AerospacePart string, OEM string, RepairLocation string, OEMEmail string);
+
+@sink(type='http-request',publisher.url='http://localhost:8080/supplierInfo/',
+method='POST', headers="'Content-Type:application/json'",sink.id="oem",
+@map(type='json', @payload("""{"oemName":"{{OEM}}"}""")))
+define stream EnrichedWheelServiceStream (aircraftType string, SerialNo string, AerospacePart string,OEM string,RepairLocation string);
+
+@source(type='http-response' ,sink.id='oem',
+@map(type='json', enclosing.element="$.oemInfo",
+@attributes(aircraftType = 'trp:aircraftType', SerialNo='trp:SerialNo',AerospacePart='trp:AerospacePart',OEM='trp:OEM',RepairLocation='trp:RepairLocation',OEMEmail= "email")))
+@sink(type='email',
+      subject='Inventory request for {{AerospacePart}} of {{OEM}}',
+      to='test@gmail.com',
+      port = '465',
+      host = 'smtp.gmail.com',
+      ssl.enable = 'true',
+      auth = 'true', 
+      content.type='text/html',
+      @map(type='text', @payload('Hi,<br/> A service request for <b>{{aircraftType}}</b> aircraft type is in pipeline. <br/>Inventory needs to be checked for <b>{{AerospacePart}}</b> of <b>{{OEM}}</b>. <br/> If not in stocks please contact OEM supplier via {{OEMEmail}} to procced with purchase. <br/> Thank you') ))
+define stream InventoryAlertStream (aircraftType string, SerialNo string, AerospacePart string, OEM string, RepairLocation string, OEMEmail string);
+
+from WheelServiceStream join RepairInfo on WheelServiceStream.partSerialNumber == RepairInfo.SerialNo
+select WheelServiceStream.aircraftType as aircraftType,
+       WheelServiceStream.partSerialNumber as SerialNo, 
+       RepairInfo.AerospacePart as AerospacePart, 
+       RepairInfo.OEM as OEM, 
+       RepairInfo.RepairLocation as RepairLocation
+insert into EnrichedWheelServiceStream;
+
+from InventoryAlertStream 
+select *
+insert into MaintenanceHistory;
+
+
+

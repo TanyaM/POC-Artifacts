@@ -1,0 +1,71 @@
+@App:name("Kafka")
+
+@App:description('Consume events from a Kafka Topic ad trigger email alerts')
+
+@source(type = 'kafka', topic.list = 'kafka_topic',group.id='group',threading.option = 'single.thread',bootstrap.servers='localhost:9092',is.binary.message='true',
+@map(type='avro',schema.def = """{"type":"record","name":"creditCard","fields":[{"name":"cardHolderName","type":"string"},{"name":"creditCardNo","type":"string"},{"name":"transactionAmount","type":"double"}]}"""))
+define stream creditCardStream (cardHolderName string, creditCardNo string, transactionAmount double);
+
+@Store(type="rdbms", jdbc.url="jdbc:mysql://localhost:3306/test", username="root", password="root", jdbc.driver.name="com.mysql.jdbc.Driver")
+@PrimaryKey("creditCardNo")
+define table cardHolderDetails(creditCardNo string, holderAddress string, holderPhone string);
+
+@sink(type='email',
+      subject='Alert for large value transaction: Card Holder Name:{{cardHolderName}}',
+      to='foo@bar.com',
+      port = '465',
+      host = 'smtp.gmail.com',
+      ssl.enable = 'true',
+      auth = 'true', 
+      content.type='text/html',
+      @map(type='text', @payload('Hi {{cardHolderName}},<br/> A transaction of $ {{lastTransaction}} is been requested for the {{creditCardType}} credit card number {{creditCardNo}}.<br/>Our agent will contact you via {{holderPhone}} <br/> Please contact our hotline immediately if this is not you <br/> Thank you') ))
+define stream AlertStream(creditCardNo string, cardHolderName string, lastTransaction double, creditCardType string, holderPhone string);
+
+@sink(type='email',
+      subject='Suspicious Transaction Alert: Card Holder Name:{{cardHolderName}}',
+      to='foo@bar.com',
+      port = '465',
+      host = 'smtp.gmail.com',
+      ssl.enable = 'true',
+      auth = 'true', 
+      content.type='text/html',
+      @map(type='text', @payload("Hi {{cardHolderName}},<br/> {{numberofTransactions}} transactions were requested during last 5 mins time period from the credit card number {{creditCardNo}}.<br/>Please contact our hotline immediately if this is not you <br/> Thank you")))
+define stream TransactionCountStream(cardHolderName string, creditCardNo string, numberofTransactions long);
+
+@sink(type='http-request',publisher.url='https://secure.ftipgw.com/ArgoFire/validate.asmx/GetCardType',
+method='POST', headers="'Content-Type:application/x-www-form-urlencoded'",sink.id="cardTypeSink",
+@map(type='keyvalue', @payload(CardNumber='{{creditCardNo}}')))
+define stream SuspiciousTransactionStream (cardHolderName string, creditCardNo string,lastTransaction double);
+
+@source(type='http-response' ,sink.id='cardTypeSink',
+@map(type='xml', namespaces = "xmlns=http://localhost/SmartPayments/",
+@attributes(creditCardNo = 'trp:creditCardNo',cardHolderName = 'trp:cardHolderName',lastTransaction = 'trp:lastTransaction',creditCardType = ".")))
+define stream EnrichedSuspiciousTransactionStream (creditCardNo string, cardHolderName string,lastTransaction double, creditCardType string); 
+  
+ 
+@info(name = 'transaction > $3000')
+from creditCardStream[transactionAmount > 3000]
+select cardHolderName as cardHolderName, creditCardNo as creditCardNo, transactionAmount as lastTransaction
+insert into SuspiciousTransactionStream;
+
+ 
+@info(name = 'Add Holder Phone')
+from EnrichedSuspiciousTransactionStream join cardHolderDetails on EnrichedSuspiciousTransactionStream.creditCardNo == cardHolderDetails.creditCardNo
+select EnrichedSuspiciousTransactionStream.creditCardNo as creditCardNo, 
+       EnrichedSuspiciousTransactionStream.cardHolderName as cardHolderName, 
+       EnrichedSuspiciousTransactionStream.lastTransaction as lastTransaction, 
+       EnrichedSuspiciousTransactionStream.creditCardType as creditCardType, 
+       cardHolderDetails.holderPhone as holderPhone
+insert into AlertStream;
+ 
+@info(name = 'TransactionCount > 5 per min')
+from creditCardStream#window.time(1 min)
+select cardHolderName, creditCardNo, count(creditCardNo) as numberofTransactions
+group by creditCardNo
+having numberofTransactions > 5
+insert into TransactionCountStream;
+
+
+
+
+
